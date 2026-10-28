@@ -1,0 +1,13 @@
+# Build output
+bin/
+obj/
+dist/
+
+# Editor settings
+.vs/
+.vscode/
+*.user
+
+# Local only: release notes, screenshots and the upload copy
+Flogger Files/
+Assets/
