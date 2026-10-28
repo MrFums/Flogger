@@ -6,12 +6,14 @@ using System.Threading.Tasks;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using EFT.Communications;
 using EFT.InventoryLogic;
 using EFT.UI;
 using EFT.UI.DragAndDrop;
 using EFT.UI.Ragfair;
 using HarmonyLib;
 using UnityEngine;
+using UnityEngine.EventSystems;
 
 namespace Flogger
 {
@@ -42,6 +44,7 @@ namespace Flogger
     internal sealed class ConfigurationManagerAttributes
     {
         public bool? Browsable;
+        public int? Order;
     }
 
     [BepInPlugin(Guid, Name, Version)]
@@ -62,8 +65,14 @@ namespace Flogger
         internal static ConfigEntry<FleaRefused> IfFleaRefuses;
         internal static ConfigEntry<bool> IncludeFence;
         internal static ConfigEntry<bool> PriceInMenu;
+        internal static ConfigEntry<bool> InMenu;
+        internal static ConfigEntry<KeyboardShortcut> SellKey;
 
-        private static readonly ConfigurationManagerAttributes SpeedShown = new ConfigurationManagerAttributes { Browsable = false };
+        private static readonly ConfigurationManagerAttributes SpeedShown = Shown(80, false);
+        private static readonly ConfigurationManagerAttributes ShareShown = Shown(70);
+        private static readonly ConfigurationManagerAttributes MarginShown = Shown(60);
+        private static MethodInfo _rebuild;
+        private static object _configManager;
         private bool _patched;
 
         internal static bool BetterFlea => FleaValue.HasBetterFlea || BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey("com.fums.betterflea.client");
@@ -90,9 +99,41 @@ namespace Flogger
             }
         }
 
-        internal static void ShowSpeed()
+        // Better Flea sells a listing at 85% or less within seconds, so there's no wait to make up for.
+        internal static int MarginPercent => BetterFlea && ListingPercent <= 85 ? 0 : FleaMargin.Value;
+
+        private static ConfigurationManagerAttributes Shown(int order, bool browsable = true)
         {
-            SpeedShown.Browsable = BetterFlea;
+            return new ConfigurationManagerAttributes { Order = order, Browsable = browsable };
+        }
+
+        // Only show the settings that do something: the slider on Custom (or without Better Flea), the margin when
+        // it's used. Configuration Manager is told to redraw when that changes.
+        internal static void ShowSettings()
+        {
+            bool betterFlea = BetterFlea;
+            bool share = !betterFlea || Speed.Value == SellSpeed.Custom;
+            bool margin = !betterFlea || ListingPercent > 85;
+            if (SpeedShown.Browsable == betterFlea && ShareShown.Browsable == share && MarginShown.Browsable == margin)
+                return;
+
+            SpeedShown.Browsable = betterFlea;
+            ShareShown.Browsable = share;
+            MarginShown.Browsable = margin;
+            try
+            {
+                if (_configManager == null
+                    && BepInEx.Bootstrap.Chainloader.PluginInfos.TryGetValue("com.bepis.bepinex.configurationmanager", out PluginInfo info) && info.Instance != null)
+                {
+                    _configManager = info.Instance;
+                    _rebuild = AccessTools.Method(info.Instance.GetType(), "BuildSettingList");
+                }
+                _rebuild?.Invoke(_configManager, null);
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning($"Couldn't refresh the settings window: {e.Message}");
+            }
         }
 
         private void Awake()
@@ -100,37 +141,49 @@ namespace Flogger
             Log = Logger;
 
             Enabled = Config.Bind("1. General", "Enabled", true,
-                "Add Quick sell to the item menu.");
+                new ConfigDescription("Turn Quick sell on or off, both the menu entry and the key.",
+                    null, Shown(100)));
             Where = Config.Bind("1. General", "Sell to", SellTo.WhoeverPaysMost,
-                "WhoeverPaysMost: the flea or the best trader, whichever gives more money. "
-                + "TradersOnly / FleaOnly: never use the other one.");
-            FleaMargin = Config.Bind("1. General", "Flea must pay this much more (%)", 10,
-                new ConfigDescription("The flea only wins if, after its fee, it pays at least this much more "
-                    + "than the best trader. Flea money comes later by mail and depends on the item selling, "
-                    + "a trader pays on the spot.",
-                    new AcceptableValueRange<int>(0, 200)));
+                new ConfigDescription("WhoeverPaysMost: the flea or the best trader, whichever gives more money. "
+                    + "TradersOnly / FleaOnly: never use the other one.",
+                    null, Shown(90)));
+            Speed = Config.Bind("1. General", "Sell speed (Better Flea)", SellSpeed.NearInstant,
+                new ConfigDescription("How fast Better Flea sells a Quick sell listing, and so what it asks. "
+                    + "NearInstant: 85% of the flea value, sells in seconds. Fast: 90%, within about a minute. "
+                    + "Normal: 100%, a few minutes. MaxProfit: 110%, can take hours and may not sell. "
+                    + "Custom: set the listing price yourself. Only shown when Better Flea is installed.",
+                    null, SpeedShown));
             ListingShare = Config.Bind("1. General", "Flea listing price (% of flea value)", 85,
                 new ConfigDescription("Flea items are listed at this share of what they're worth on the flea "
                     + "in their current condition: Better Flea's own price when it's installed, otherwise the "
                     + "average flea price adjusted for condition. With Better Flea, 85% or less sells fastest, "
                     + "up to 100% sells slower, above it rarely sells and above 115% never does. "
-                    + "With Better Flea this is only used when Sell speed is Custom.",
-                    new AcceptableValueRange<int>(30, 115)));
-            Speed = Config.Bind("1. General", "Sell speed (Better Flea)", SellSpeed.NearInstant,
-                new ConfigDescription("How fast Better Flea sells a Quick sell listing, and so what it asks. "
-                    + "NearInstant: 85% of the flea value, sells in seconds. Fast: 90%, within about a minute. "
-                    + "Normal: 100%, a few minutes. MaxProfit: 110%, can take hours and may not sell. "
-                    + "Custom: use the listing price slider. Only shown when Better Flea is installed.",
-                    null, SpeedShown));
+                    + "With Better Flea this is only shown when Sell speed is Custom.",
+                    new AcceptableValueRange<int>(30, 115), ShareShown));
+            FleaMargin = Config.Bind("1. General", "Flea must pay this much more (%)", 10,
+                new ConfigDescription("The flea only wins if, after its fee, it pays at least this much more "
+                    + "than the best trader. Flea money comes later by mail and depends on the item selling, "
+                    + "a trader pays on the spot. Hidden and not used with Better Flea when the listing price is "
+                    + "85% or less, since those listings sell within seconds.",
+                    new AcceptableValueRange<int>(0, 200), MarginShown));
             IfFleaRefuses = Config.Bind("1. General", "If the flea cannot take an item", FleaRefused.Ask,
-                "When the flea would pay the most for an item but can't take it (banned, not found in raid, "
-                + "bought from a trader, no free offer slots, not enough roubles for the fee, or the listing is "
-                + "turned down). Ask: show why and ask before selling it to the best trader. "
-                + "SellToTrader: sell it to the best trader without asking. KeepIt: keep it.");
+                new ConfigDescription("When the flea would pay the most for an item but can't take it (banned, not found in raid, "
+                    + "bought from a trader, no free offer slots, not enough roubles for the fee, or the listing is "
+                    + "turned down). Ask: show why and ask before selling it to the best trader. "
+                    + "SellToTrader: sell it to the best trader without asking. KeepIt: keep it.",
+                    null, Shown(50)));
             IncludeFence = Config.Bind("1. General", "Include Fence", true,
-                "Let Fence buy things when he pays the most.");
+                new ConfigDescription("Let Fence buy things when he pays the most.", null, Shown(40)));
+            SellKey = Config.Bind("1. General", "Quick sell key", new KeyboardShortcut(KeyCode.Space),
+                new ConfigDescription("Hold this and left click an item to sell it to the best trader, or right click "
+                    + "to list it on the flea. If the flea can't take it, it's handled the way 'If the flea cannot "
+                    + "take an item' says.",
+                    null, Shown(30)));
+            InMenu = Config.Bind("1. General", "Show Quick sell in the item menu", true,
+                new ConfigDescription("Add Quick sell to the right click menu. The Quick sell key works either way.",
+                    null, Shown(20)));
             PriceInMenu = Config.Bind("1. General", "Show where it goes in the menu", true,
-                "Show the buyer and price next to Quick sell.");
+                new ConfigDescription("Show the buyer and price next to Quick sell.", null, Shown(10)));
 
             var harmony = new Harmony(Guid);
             try
@@ -145,7 +198,7 @@ namespace Flogger
             }
 
             _patched = true;
-            ShowSpeed();
+            ShowSettings();
             Logger.LogInfo($"{Name} {Version} loaded.");
         }
 
@@ -251,6 +304,44 @@ namespace Flogger
             {
                 Plugin.Log.LogWarning($"Couldn't ask for prices on hover: {e.Message}");
             }
+
+            try
+            {
+                MethodInfo click = typeof(ItemView).GetInterfaceMap(typeof(IPointerClickHandler)).TargetMethods[0];
+                harmony.Patch(click, prefix: new HarmonyMethod(typeof(Menu), nameof(ClickPrefix)));
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning($"Couldn't hook item clicks, the Quick sell key is off: {e.Message}");
+            }
+        }
+
+        // Key + left click sells to a trader, key + right click lists on the flea.
+        private static bool ClickPrefix(ItemView __instance, PointerEventData eventData)
+        {
+            bool left = eventData.button == PointerEventData.InputButton.Left;
+            if (!left && eventData.button != PointerEventData.InputButton.Right)
+                return true;
+            if (!Plugin.Enabled.Value || Market.InRaid || !Plugin.SellKey.Value.IsPressed())
+                return true;
+
+            Item item = __instance.Item;
+            if (item == null || __instance.ItemContext?.ViewType != EItemViewType.Inventory)
+                return true;
+
+            try
+            {
+                string why = QuickSeller.Unsellable(item, QuickSeller.PlayerStash, QuickSeller.PlayerController, true);
+                if (why != null)
+                    NotificationManager.DisplayWarningNotification($"Can't Quick sell {QuickSeller.Name(item)}: {why}");
+                else
+                    QuickSeller.Sell(Selection.For(item), left ? SellTo.TradersOnly : SellTo.WhoeverPaysMost, !left);
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogError($"Quick sell key failed: {e}");
+            }
+            return false;
         }
 
         private static void Postfix(ItemUiContext __instance, ItemContext itemContext, Action closeAction,
@@ -259,7 +350,7 @@ namespace Flogger
             try
             {
                 Item item = itemContext?.Item;
-                if (!Plugin.Enabled.Value || __result == null || item == null || Market.InRaid)
+                if (!Plugin.Enabled.Value || !Plugin.InMenu.Value || __result == null || item == null || Market.InRaid)
                     return;
                 if (itemContext.ViewType != EItemViewType.Inventory)
                 {
@@ -282,7 +373,7 @@ namespace Flogger
                 {
                     var items = Selection.For(item);
                     close();
-                    QuickSeller.Sell(items);
+                    QuickSeller.Sell(items, Plugin.Where.Value);
                 }, Icon);
             }
             catch (Exception e)
@@ -351,7 +442,7 @@ namespace Flogger
             if (Time.realtimeSinceStartup < _nextUpdate)
                 return;
             _nextUpdate = Time.realtimeSinceStartup + 1f;
-            Plugin.ShowSpeed();
+            Plugin.ShowSettings();
 
             if (Market.InRaid)
             {
@@ -435,12 +526,13 @@ namespace Flogger
                     if (flea && !FleaValue.TryGet(each, out value))
                         ready = false;
                     else if (ready)
-                        sales.Add(Sale.For(each, value, ragFair, controller));
+                        sales.Add(Sale.For(each, value, ragFair, controller, Plugin.Where.Value));
                 }
                 if (!ready)
                     return plain;
 
-                QuickSeller.Plan(sales, Market.FreeOffers(ragFair), sales.Any(s => s.FleaPossible) ? QuickSeller.Roubles(stash) : 0d);
+                QuickSeller.Plan(sales, Market.FreeOffers(ragFair), sales.Any(s => s.FleaPossible) ? QuickSeller.Roubles(stash) : 0d,
+                    Plugin.Where.Value);
 
                 double total = 0d;
                 double lost = 0d;

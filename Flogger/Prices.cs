@@ -104,7 +104,7 @@ namespace Flogger
         {
             best = default;
             var session = Session;
-            if (session?.Traders == null || Plugin.Where.Value == SellTo.FleaOnly)
+            if (session?.Traders == null)
                 return false;
 
             foreach (Trader trader in Unlocked(session))

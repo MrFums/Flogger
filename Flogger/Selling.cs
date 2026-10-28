@@ -37,11 +37,16 @@ namespace Flogger
 
         public bool ToFlea;
 
-        public static Sale For(Item item, double fleaValue, RagFair ragFair, ItemController controller)
+        // Loose copies of an item at the same price go up as one offer, the way the game lists several at once.
+        public string Offer => Item.GetAllItems().Skip(1).Any() ? Item.Id.ToString() : $"{Item.TemplateId}:{ListPrice}";
+
+        // fleaFirst: the flea is wanted whatever a trader pays, so anything it can't take is asked about.
+        public static Sale For(Item item, double fleaValue, RagFair ragFair, ItemController controller, SellTo where, bool fleaFirst = false)
         {
             var sale = new Sale { Item = item, Name = QuickSeller.Name(item), Count = Math.Max(1, item.StackObjectsCount) };
-            Market.BestTrader(item, out sale.Trader);
-            if (Plugin.Where.Value == SellTo.TradersOnly)
+            if (where != SellTo.FleaOnly)
+                Market.BestTrader(item, out sale.Trader);
+            if (where == SellTo.TradersOnly)
                 return sale;
 
             if (fleaValue > 0d)
@@ -58,8 +63,8 @@ namespace Flogger
                 sale.FleaNet = (double)sale.ListPrice * sale.Count - sale.Fee;
             }
 
-            sale.FleaWouldWin = sale.FleaNet > 0d
-                                && (!sale.HasTrader || sale.FleaNet >= sale.Trader.Roubles * (1d + Plugin.FleaMargin.Value / 100d));
+            sale.FleaWouldWin = fleaFirst
+                                || sale.FleaNet > 0d && (!sale.HasTrader || sale.FleaNet >= sale.Trader.Roubles * (1d + Plugin.MarginPercent / 100d));
 
             if (ragFair == null)
             {
@@ -109,25 +114,28 @@ namespace Flogger
             return Math.Max(1, (int)Math.Floor(fleaValue * Plugin.ListingPercent / 100d));
         }
 
-        public static void Plan(List<Sale> sales, int freeOffers, double roubles)
+        public static void Plan(List<Sale> sales, int freeOffers, double roubles, SellTo where)
         {
-            foreach (Sale sale in sales.Where(s => s.FleaPossible && (Plugin.Where.Value == SellTo.FleaOnly || s.FleaWouldWin))
+            var offers = new HashSet<string>();
+            foreach (Sale sale in sales.Where(s => s.FleaPossible && (where == SellTo.FleaOnly || s.FleaWouldWin))
                          .OrderByDescending(s => s.FleaNet - s.Trader.Roubles))
             {
-                if (freeOffers <= 0)
+                bool newOffer = !offers.Contains(sale.Offer);
+                if (newOffer && freeOffers <= 0)
                     sale.FleaRefusal = "no free flea offer slots";
                 else if (roubles < sale.Fee)
                     sale.FleaRefusal = "not enough roubles in your stash for the flea fee";
                 else
                 {
                     sale.ToFlea = true;
-                    freeOffers--;
+                    if (offers.Add(sale.Offer))
+                        freeOffers--;
                     roubles -= sale.Fee;
                 }
             }
         }
 
-        public static async void Sell(List<Item> picked)
+        public static async void Sell(List<Item> picked, SellTo where, bool fleaFirst = false)
         {
             if (_busy)
             {
@@ -138,7 +146,7 @@ namespace Flogger
             _busy = true;
             try
             {
-                await SellAll(picked);
+                await SellAll(picked, where, fleaFirst);
             }
             catch (Exception e)
             {
@@ -206,7 +214,7 @@ namespace Flogger
             return container.GetAllItems().Where(i => i != container && i.CurrentAddress is GridItemAddress);
         }
 
-        private static async Task SellAll(List<Item> picked)
+        private static async Task SellAll(List<Item> picked, SellTo where, bool fleaFirst)
         {
             ItemController controller = PlayerController;
             Stash stash = PlayerStash;
@@ -230,7 +238,7 @@ namespace Flogger
                 .GroupBy(entry => entry.Depth, entry => entry.Item)
                 .OrderByDescending(wave => wave.Key);
             foreach (var wave in waves)
-                await SellWave(wave.ToList(), stash, controller, done, problems);
+                await SellWave(wave.ToList(), stash, controller, done, problems, where, fleaFirst);
 
             Report(done, problems);
         }
@@ -261,7 +269,8 @@ namespace Flogger
             return await context.ShowMessageWindow(out _, text, "Quick sell");
         }
 
-        private static async Task SellWave(List<Item> wave, Stash stash, ItemController controller, List<string> done, List<string> problems)
+        private static async Task SellWave(List<Item> wave, Stash stash, ItemController controller, List<string> done, List<string> problems,
+            SellTo where, bool fleaFirst)
         {
             var items = new List<Item>();
             foreach (Item item in wave)
@@ -279,7 +288,7 @@ namespace Flogger
             await Market.LoadTraderPrices();
             IEftSession session = Market.Session;
             RagFair ragFair = Market.OpenFlea;
-            bool flea = ragFair != null && Plugin.Where.Value != SellTo.TradersOnly;
+            bool flea = ragFair != null && where != SellTo.TradersOnly;
 
             var values = items.Select(item => flea ? FleaValue.Get(item, SaleMaxAge) : Task.FromResult((0d, false))).ToList();
             await Task.WhenAll(values);
@@ -288,20 +297,20 @@ namespace Flogger
             for (int i = 0; i < items.Count; i++)
             {
                 (double value, bool exact) = values[i].Result;
-                Sale sale = Sale.For(items[i], value, ragFair, controller);
+                Sale sale = Sale.For(items[i], value, ragFair, controller, where, fleaFirst);
                 if (value > 0d)
                     Plugin.Log.LogInfo($"{sale.Name}: flea value {Money(value)} ({(exact ? "Better Flea" : "base game")}), "
                                        + $"listing price {Money(sale.ListPrice)}, fee {Money(sale.Fee)}");
                 all.Add(sale);
             }
-            Plan(all, Market.FreeOffers(ragFair), Roubles(stash));
+            Plan(all, Market.FreeOffers(ragFair), Roubles(stash), where);
 
             var sales = new List<Sale>();
             var refused = new List<Sale>();
             foreach (Sale sale in all)
             {
                 if (!sale.ToFlea && !sale.HasTrader)
-                    problems.Add(sale.FleaBanned && Plugin.Where.Value == SellTo.WhoeverPaysMost
+                    problems.Add(sale.FleaBanned && where == SellTo.WhoeverPaysMost
                         ? $"{sale.Name}: can't be sold anywhere, the flea won't take it ({sale.FleaRefusal}) and no trader buys it"
                         : $"{sale.Name}: {sale.FleaRefusal ?? "no trader buys this"}");
                 else if (!sale.ToFlea && sale.FleaWouldWin)
@@ -313,20 +322,25 @@ namespace Flogger
             foreach (var group in sales.Where(s => !s.ToFlea).GroupBy(s => s.Trader.Trader))
                 await SellToTrader(session, group.Key, group.ToList(), done, problems);
 
-            foreach (Sale sale in sales.Where(s => s.ToFlea))
+            foreach (var offer in sales.Where(s => s.ToFlea).GroupBy(s => s.Offer))
             {
-                if (await ListOnFlea(ragFair, sale, stash))
-                {
-                    done.Add($"{sale.Name} listed on the flea for {Money(sale.ListPrice)}{(sale.Count > 1 ? " each" : "")} (fee {Money(sale.Fee)})");
-                    continue;
-                }
+                List<Sale> group = offer.ToList();
+                Sale first = group[0];
+                await ListOnFlea(ragFair, group, stash);
+                int listed = group.Where(s => !StillOwned(s.Item, stash)).Sum(s => s.Count);
+                if (listed > 0)
+                    done.Add($"{first.Name}{(listed > 1 ? $" x{listed}" : "")} listed on the flea for {Money(first.ListPrice)}{(listed > 1 ? " each" : "")} "
+                             + $"(fee {Money(group.Sum(s => s.Fee))})");
 
-                sale.ToFlea = false;
-                sale.FleaRefusal = "the flea didn't take it";
-                if (Market.BestTrader(sale.Item, out sale.Trader))
-                    refused.Add(sale);
-                else
-                    problems.Add($"{sale.Name}: {sale.FleaRefusal}");
+                foreach (Sale sale in group.Where(s => StillOwned(s.Item, stash)))
+                {
+                    sale.ToFlea = false;
+                    sale.FleaRefusal = "the flea didn't take it";
+                    if (where != SellTo.FleaOnly && Market.BestTrader(sale.Item, out sale.Trader))
+                        refused.Add(sale);
+                    else
+                        problems.Add($"{sale.Name}: {sale.FleaRefusal}");
+                }
             }
 
             if (refused.Count > 0 && await SellRefusedToTraders(refused))
@@ -413,16 +427,15 @@ namespace Flogger
             done.Add($"{(selling.Count == 1 ? selling[0].Name : $"{selling.Count} items")} sold to {trader.LocalizedName} for {Money(total, trader)}");
         }
 
-        private static async Task<bool> ListOnFlea(RagFair ragFair, Sale sale, Stash stash)
+        private static async Task ListOnFlea(RagFair ragFair, List<Sale> sales, Stash stash)
         {
-            var requirement = new BarterTemplate { _tpl = CurrencyUtil.ROUBLE_ID.ToString(), count = sale.ListPrice };
+            var requirement = new BarterTemplate { _tpl = CurrencyUtil.ROUBLE_ID.ToString(), count = sales[0].ListPrice };
             var finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            ragFair.AddOffer(false, new[] { sale.Item.Id.ToString() }, new[] { requirement }, () => finished.TrySetResult(true));
+            ragFair.AddOffer(false, sales.Select(s => s.Item.Id.ToString()).ToArray(), new[] { requirement }, () => finished.TrySetResult(true));
             await finished.Task;
 
-            // AddOffer only says it's done, not whether it worked: the item leaving the inventory is the answer
-            await WaitWhile(() => StillOwned(sale.Item, stash));
-            return !StillOwned(sale.Item, stash);
+            // AddOffer only says it's done, not whether it worked: the items leaving the inventory are the answer
+            await WaitWhile(() => sales.Any(s => StillOwned(s.Item, stash)));
         }
 
         private static async Task WaitWhile(Func<bool> condition)
