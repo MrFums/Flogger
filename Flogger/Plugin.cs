@@ -53,7 +53,7 @@ namespace Flogger
     {
         public const string Guid = "com.fums.flogger";
         public const string Name = "Fums-Flogger";
-        public const string Version = "1.0.0";
+        public const string Version = "1.1.0";
 
         internal static ManualLogSource Log;
 

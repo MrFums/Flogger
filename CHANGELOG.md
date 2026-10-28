@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0
+
+- **Quick sell key**: hold Space (changeable in F12) and left click an item to sell it to the best trader, or right click to list it on the flea. If the flea can't take it (no free offer slots, banned, not found in raid...), you get the same question as from the menu and can sell it to the trader instead.
+- New setting to hide Quick sell from the item menu, for if you only want to use the key.
+- Several of the same item at the same price now go up as one stacked flea offer, using one offer slot, the way the game lists several at once.
+- With Better Flea on Near instant, the flea is picked whenever it pays more than the best trader. The 10% margin is only used for slower listings or without Better Flea.
+- Neater settings: the listing price slider only shows on Custom (or without Better Flea), the margin only when it's used, and settings are in a sensible order.
+
 ## 1.0.0
 
 First release.
