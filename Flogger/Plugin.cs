@@ -31,6 +31,13 @@ namespace Flogger
         KeepIt
     }
 
+    public enum MenuSpot
+    {
+        UnderInspect,
+        UnderWishlist,
+        Bottom
+    }
+
     public enum SellSpeed
     {
         NearInstant,
@@ -53,7 +60,7 @@ namespace Flogger
     {
         public const string Guid = "com.fums.flogger";
         public const string Name = "Fums-Flogger";
-        public const string Version = "1.1.0";
+        public const string Version = "1.1.1";
 
         internal static ManualLogSource Log;
 
@@ -66,6 +73,7 @@ namespace Flogger
         internal static ConfigEntry<bool> IncludeFence;
         internal static ConfigEntry<bool> PriceInMenu;
         internal static ConfigEntry<bool> InMenu;
+        internal static ConfigEntry<MenuSpot> MenuPosition;
         internal static ConfigEntry<KeyboardShortcut> SellKey;
 
         private static readonly ConfigurationManagerAttributes SpeedShown = Shown(80, false);
@@ -182,6 +190,11 @@ namespace Flogger
             InMenu = Config.Bind("1. General", "Show Quick sell in the item menu", true,
                 new ConfigDescription("Add Quick sell to the right click menu. The Quick sell key works either way.",
                     null, Shown(20)));
+            MenuPosition = Config.Bind("1. General", "Quick sell position in the item menu", MenuSpot.UnderInspect,
+                new ConfigDescription("Where Quick sell goes in the right click menu. UnderInspect: right below Inspect. "
+                    + "UnderWishlist: right below Add to wishlist, above the pin and lock row. Bottom: last entry, "
+                    + "after other mods' entries too, away from Open, so a click meant for Open can't sell a whole box.",
+                    null, Shown(15)));
             PriceInMenu = Config.Bind("1. General", "Show where it goes in the menu", true,
                 new ConfigDescription("Show the buyer and price next to Quick sell.", null, Shown(10)));
 
@@ -264,6 +277,8 @@ namespace Flogger
 
         private static readonly HashSet<string> Explained = new HashSet<string>();
         private static Transform _inspect;
+        private static Transform _wishlist;
+        private static Transform _entry;
         private static Item _hovered;
         private static float _nextUpdate;
         private static float _warmedAt = float.NegativeInfinity;
@@ -392,17 +407,28 @@ namespace Flogger
         {
             if (key == nameof(EItemInfoButton.Inspect) || key == nameof(EItemInfoButton.Examine))
                 _inspect = __result.Transform;
+            else if (key == nameof(EItemInfoButton.AddToWishlist) || key == nameof(EItemInfoButton.RemoveFromWishlist))
+                _wishlist = __result.Transform;
         }
 
-        // Dynamic entries are added last; move Quick sell up under Inspect. The inspect window's fixed-width
+        // Dynamic entries are added last; move Quick sell under Inspect or Wishlist per the setting. For Bottom it
+        // moves again after each later dynamic entry (Fika's Send), so it ends up last. The inspect window's fixed-width
         // button grid has no room for the price, so it's left out there.
         private static void DynamicPostfix(InteractionButtonsContainer __instance, DynamicContextInteraction interaction)
         {
             RectTransform container = __instance._buttonsContainer;
-            if (interaction?.Id != EntryId || container == null || container.childCount == 0)
+            if (container == null || container.childCount == 0)
                 return;
 
+            if (interaction?.Id != EntryId)
+            {
+                if (Plugin.MenuPosition.Value == MenuSpot.Bottom && _entry != null && _entry.parent == container)
+                    _entry.SetAsLastSibling();
+                return;
+            }
+
             Transform entry = container.GetChild(container.childCount - 1);
+            _entry = entry;
             if (__instance.GetComponentInParent<ItemSpecificationPanel>() != null)
             {
                 entry.gameObject.SetActive(false);
@@ -415,8 +441,17 @@ namespace Flogger
                     image.preserveAspect = true;
             }
 
-            if (_inspect != null && _inspect.parent == container && entry != _inspect)
-                entry.SetSiblingIndex(_inspect.GetSiblingIndex() + 1);
+            switch (Plugin.MenuPosition.Value)
+            {
+                case MenuSpot.UnderInspect:
+                    if (_inspect != null && _inspect.parent == container && entry != _inspect)
+                        entry.SetSiblingIndex(_inspect.GetSiblingIndex() + 1);
+                    break;
+                case MenuSpot.UnderWishlist:
+                    if (_wishlist != null && _wishlist.parent == container && entry != _wishlist)
+                        entry.SetSiblingIndex(_wishlist.GetSiblingIndex() + 1);
+                    break;
+            }
         }
 
         private static void HoverPostfix(ItemView __instance)

@@ -36,6 +36,7 @@ Press **F12** in game > Fums-Flogger.
 - **Include Fence** and **show where it goes in the menu**.
 - **Quick sell key**: hold it (Space by default) and left click an item to sell it to the best trader, or right click to list it on the flea. If the flea can't take it, you get the same question as from the menu.
 - **Show Quick sell in the item menu**: turn it off to only use the key.
+- **Quick sell position in the item menu**: under Inspect (default), under Add to wishlist, or at the bottom, so a click meant for Open can't sell a whole box.
 
 ## Compatibility
 - Better Flea 2.3.0 or newer for its prices. Older versions work, but Flogger uses the normal flea prices.

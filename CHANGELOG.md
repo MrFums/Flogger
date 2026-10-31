@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.1
+
+- New setting **Quick sell position in the item menu**: under Inspect (default), under Add to wishlist, or at the bottom, so a click meant for Open can't sell a whole box. Bottom stays last even with Fika's Send entry.
+
 ## 1.1.0
 
 - **Quick sell key**: hold Space (changeable in F12) and left click an item to sell it to the best trader, or right click to list it on the flea. If the flea can't take it (no free offer slots, banned, not found in raid...), you get the same question as from the menu and can sell it to the trader instead.
