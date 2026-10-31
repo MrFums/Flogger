@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
@@ -126,16 +127,76 @@ namespace Flogger
         }
     }
 
+    internal static class Limiter
+    {
+        private const int MaxInFlight = 4;
+        private const int PerSecond = 20;
+        private const long WindowMs = 1000;
+
+        private static readonly object Gate = new object();
+        private static readonly Queue<TaskCompletionSource<bool>> Urgent = new Queue<TaskCompletionSource<bool>>();
+        private static readonly Queue<TaskCompletionSource<bool>> Background = new Queue<TaskCompletionSource<bool>>();
+        private static readonly Queue<long> Started = new Queue<long>();
+        private static readonly Stopwatch Clock = Stopwatch.StartNew();
+        private static readonly System.Threading.Timer Wake = new System.Threading.Timer(_ => Pump(), null, Timeout.Infinite, Timeout.Infinite);
+        private static int _running;
+
+        public static async Task<T> Run<T>(bool urgent, Func<Task<T>> send)
+        {
+            var turn = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (Gate)
+                (urgent ? Urgent : Background).Enqueue(turn);
+            Pump();
+
+            await turn.Task;
+            try
+            {
+                return await send();
+            }
+            finally
+            {
+                lock (Gate)
+                    _running--;
+                Pump();
+            }
+        }
+
+        private static void Pump()
+        {
+            lock (Gate)
+            {
+                long now = Clock.ElapsedMilliseconds;
+                while (Started.Count > 0 && now - Started.Peek() >= WindowMs)
+                    Started.Dequeue();
+
+                while (_running < MaxInFlight && Started.Count < PerSecond)
+                {
+                    TaskCompletionSource<bool> next = Urgent.Count > 0 ? Urgent.Dequeue() : Background.Count > 0 ? Background.Dequeue() : null;
+                    if (next == null)
+                        return;
+
+                    _running++;
+                    Started.Enqueue(now);
+                    next.SetResult(true);
+                }
+
+                if (_running < MaxInFlight && Started.Count >= PerSecond && (Urgent.Count > 0 || Background.Count > 0))
+                    Wake.Change(Math.Max(1L, WindowMs - (now - Started.Peek())), Timeout.Infinite);
+            }
+        }
+    }
+
     internal static class FleaValue
     {
         private const string FleaRoute = "/betterflea/item-price";
         private const int MostCached = 10000;
+        private const float RetryAfter = 10f;
+        private const int AverageTimeoutMs = 30000;
         public const float KeepFor = 120f;
 
         private static readonly JsonSerializerSettings Json = new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore };
-        private static readonly SemaphoreSlim InFlight = new SemaphoreSlim(4);
-        private static readonly Func<string, Task<double?>> AskFlea = Post;
-        private static readonly Func<string, Task<double?>> AskAverage = MarketAverage;
+        private static readonly Func<string, bool, Task<double?>> AskFlea = Post;
+        private static readonly Func<string, bool, Task<double?>> AskAverage = MarketAverage;
 
         private static readonly Dictionary<string, Entry> Flea = new Dictionary<string, Entry>();
         private static readonly Dictionary<string, Entry> Average = new Dictionary<string, Entry>();
@@ -147,6 +208,7 @@ namespace Flogger
         {
             public double Price;
             public float FetchedAt = float.NegativeInfinity;
+            public bool Failed;
             public Task<double> Pending;
         }
 
@@ -184,7 +246,6 @@ namespace Flogger
             return TryAverage(item, out value);
         }
 
-        // Better Flea 2.3.0+ answers an empty list with {"Price":0}; an older one or none refuses it.
         private static Task<bool> BetterFlea()
         {
             if (_betterFlea != null)
@@ -198,7 +259,7 @@ namespace Flogger
             {
                 try
                 {
-                    await Post("[]");
+                    await Post("[]", true);
                     Plugin.Log.LogInfo("Better Flea found on the server, flea prices are its own.");
                     return true;
                 }
@@ -210,80 +271,88 @@ namespace Flogger
             }
         }
 
-        private static async Task<double?> Post(string body)
+        private static Task<double?> Post(string body, bool urgent)
         {
-            await InFlight.WaitAsync();
-            try
+            return Limiter.Run(urgent, () => Send(body));
+        }
+
+        private static async Task<double?> Send(string body)
+        {
+            Client client = RequestHandler.HttpClient;
+            using (HttpRequestMessage request = client.CreateNewHttpRequest(HttpMethod.Post, FleaRoute))
             {
-                Client client = RequestHandler.HttpClient;
-                using (HttpRequestMessage request = client.CreateNewHttpRequest(HttpMethod.Post, FleaRoute))
+                request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+                using (HttpResponseMessage response = await client.HttpClient.SendAsync(request))
                 {
-                    request.Content = new StringContent(body, Encoding.UTF8, "application/json");
-                    using (HttpResponseMessage response = await client.HttpClient.SendAsync(request))
-                    {
-                        if (!response.IsSuccessStatusCode)
-                            throw new Exception("the server answered " + (int)response.StatusCode);
+                    if (!response.IsSuccessStatusCode)
+                        throw new Exception("the server answered " + (int)response.StatusCode);
 
-                        byte[] data = await response.Content.ReadAsByteArrayAsync();
-                        if (Zlib.IsCompressed(data))
-                            data = Zlib.Decompress(data);
+                    byte[] data = await response.Content.ReadAsByteArrayAsync();
+                    if (Zlib.IsCompressed(data))
+                        data = Zlib.Decompress(data);
 
-                        var answer = JsonConvert.DeserializeObject<FleaAnswer>(Encoding.UTF8.GetString(data))
-                                     ?? throw new Exception("the server sent nothing back");
-                        return answer.Price;
-                    }
+                    var answer = JsonConvert.DeserializeObject<FleaAnswer>(Encoding.UTF8.GetString(data))
+                                 ?? throw new Exception("the server sent nothing back");
+                    return answer.Price;
                 }
             }
-            finally
-            {
-                InFlight.Release();
-            }
         }
 
-        private static Task<double?> MarketAverage(string tpl)
+        private static Task<double?> MarketAverage(string tpl, bool urgent)
         {
-            var done = new TaskCompletionSource<double?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            return Limiter.Run(urgent, () => FetchAverage(tpl));
+        }
+
+        private static async Task<double?> FetchAverage(string tpl)
+        {
             var session = Market.Session;
             if (session == null)
-                done.SetResult(null);
-            else
-                session.GetMarketPrices(tpl, result => done.TrySetResult(result.Succeed && result.Value != null ? result.Value.avg : (double?)null));
-            return done.Task;
+                return null;
+
+            var done = new TaskCompletionSource<double?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            session.GetMarketPrices(tpl, result => done.TrySetResult(result.Succeed && result.Value != null ? result.Value.avg : (double?)null));
+            if (await Task.WhenAny(done.Task, Task.Delay(AverageTimeoutMs)) != done.Task)
+                throw new TimeoutException("the market prices took too long");
+            return await done.Task;
         }
 
-        private static Task<double> Ask(Dictionary<string, Entry> cache, string key, Func<string, Task<double?>> ask, float maxAge)
+        private static Task<double> Ask(Dictionary<string, Entry> cache, string key, Func<string, bool, Task<double?>> ask, float maxAge)
         {
             Entry entry = Find(cache, key);
             if (entry.Pending != null)
                 return entry.Pending;
-            if (Time.realtimeSinceStartup - entry.FetchedAt <= maxAge)
+            if (Time.realtimeSinceStartup - entry.FetchedAt <= (entry.Failed ? Math.Min(maxAge, RetryAfter) : maxAge))
                 return Task.FromResult(entry.Price);
-            return Refresh(entry, key, ask);
+            return Refresh(entry, key, ask, false);
         }
 
-        private static Entry Peek(Dictionary<string, Entry> cache, string key, Func<string, Task<double?>> ask)
+        private static Entry Peek(Dictionary<string, Entry> cache, string key, Func<string, bool, Task<double?>> ask)
         {
             Entry entry = Find(cache, key);
-            if (entry.Pending == null && Time.realtimeSinceStartup - entry.FetchedAt > KeepFor)
-                Refresh(entry, key, ask);
+            if (entry.Pending == null && Time.realtimeSinceStartup - entry.FetchedAt > (entry.Failed ? RetryAfter : KeepFor))
+                Refresh(entry, key, ask, true);
             return entry;
         }
 
-        private static Task<double> Refresh(Entry entry, string key, Func<string, Task<double?>> ask)
+        private static Task<double> Refresh(Entry entry, string key, Func<string, bool, Task<double?>> ask, bool urgent)
         {
-            Task<double> running = Run(entry, key, ask);
+            Task<double> running = Run(entry, key, ask, urgent);
             if (!running.IsCompleted)
                 entry.Pending = running;
             return running;
         }
 
-        private static async Task<double> Run(Entry entry, string key, Func<string, Task<double?>> ask)
+        private static async Task<double> Run(Entry entry, string key, Func<string, bool, Task<double?>> ask, bool urgent)
         {
+            bool failed = true;
             try
             {
-                double? price = await ask(key);
+                double? price = await ask(key, urgent);
                 if (price != null)
+                {
                     entry.Price = Math.Max(0d, price.Value);
+                    failed = false;
+                }
             }
             catch (Exception e)
             {
@@ -292,6 +361,7 @@ namespace Flogger
             finally
             {
                 entry.Pending = null;
+                entry.Failed = failed;
                 entry.FetchedAt = Time.realtimeSinceStartup;
             }
 

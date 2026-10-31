@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2
+
+- Price requests are now rate limited: at most 4 at a time and 20 a second, shared by Better Flea prices and the flea's average prices. Warming up the stash and pricing a sale no longer flood the server, which could cause SSL errors and stop a profile from saving. The item you hover still gets its price first.
+- A price request that fails is retried after about 10 seconds instead of keeping the old price for minutes.
+
 ## 1.1.1
 
 - New setting **Quick sell position in the item menu**: under Inspect (default), under Add to wishlist, or at the bottom, so a click meant for Open can't sell a whole box. Bottom stays last even with Fika's Send entry.
