@@ -127,21 +127,44 @@ namespace Flogger
         }
     }
 
+    internal enum Priority
+    {
+        Hover,
+        Sale,
+        Warm
+    }
+
+    internal sealed class Ticket
+    {
+        public Priority Priority;
+        public bool StartedAsWarm;
+        public readonly TaskCompletionSource<bool> Turn = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Ticket(Priority priority)
+        {
+            Priority = priority;
+        }
+    }
+
     internal static class Limiter
     {
         private const int MaxInFlight = 4;
         private const int PerSecond = 20;
+        private const int WarmInFlight = 1;
+        private const int WarmPerSecond = 3;
         private const long WindowMs = 1000;
+        private const int FailuresBeforePause = 3;
         private const long BasePauseMs = 10000;
         private const long MaxPauseMs = 60000;
 
         private static readonly object Gate = new object();
-        private static readonly Queue<TaskCompletionSource<bool>> Urgent = new Queue<TaskCompletionSource<bool>>();
-        private static readonly Queue<TaskCompletionSource<bool>> Background = new Queue<TaskCompletionSource<bool>>();
+        private static readonly List<Ticket> Waiting = new List<Ticket>();
         private static readonly Queue<long> Started = new Queue<long>();
+        private static readonly Queue<long> WarmStarted = new Queue<long>();
         private static readonly Stopwatch Clock = Stopwatch.StartNew();
         private static readonly System.Threading.Timer Wake = new System.Threading.Timer(_ => Pump(), null, Timeout.Infinite, Timeout.Infinite);
         private static int _running;
+        private static int _warmRunning;
         private static int _failures;
         private static long _pausedUntil;
 
@@ -156,19 +179,40 @@ namespace Flogger
             lock (Gate)
             {
                 _failures++;
-                long pause = Math.Min(MaxPauseMs, BasePauseMs << Math.Min(_failures - 1, 6));
+                if (_failures < FailuresBeforePause)
+                    return;
+
+                long pause = Math.Min(MaxPauseMs, BasePauseMs << Math.Min(_failures - FailuresBeforePause, 6));
                 _pausedUntil = Math.Max(_pausedUntil, Clock.ElapsedMilliseconds + pause);
+                Plugin.Log.LogWarning($"{_failures} price requests failed in a row, pausing price requests for {pause / 1000} s.");
             }
         }
 
-        public static async Task<T> Run<T>(bool urgent, Func<Task<T>> send)
+        public static void Promote(Ticket ticket, Priority priority)
         {
-            var turn = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (ticket == null)
+                return;
+
+            bool changed = false;
             lock (Gate)
-                (urgent ? Urgent : Background).Enqueue(turn);
+            {
+                if (priority < ticket.Priority)
+                {
+                    ticket.Priority = priority;
+                    changed = Waiting.Contains(ticket);
+                }
+            }
+            if (changed)
+                Pump();
+        }
+
+        public static async Task<T> Run<T>(Ticket ticket, Func<Task<T>> send)
+        {
+            lock (Gate)
+                Waiting.Add(ticket);
             Pump();
 
-            await turn.Task;
+            await ticket.Turn.Task;
             try
             {
                 return await send();
@@ -176,7 +220,11 @@ namespace Flogger
             finally
             {
                 lock (Gate)
+                {
                     _running--;
+                    if (ticket.StartedAsWarm)
+                        _warmRunning--;
+                }
                 Pump();
             }
         }
@@ -188,25 +236,52 @@ namespace Flogger
                 long now = Clock.ElapsedMilliseconds;
                 while (Started.Count > 0 && now - Started.Peek() >= WindowMs)
                     Started.Dequeue();
+                while (WarmStarted.Count > 0 && now - WarmStarted.Peek() >= WindowMs)
+                    WarmStarted.Dequeue();
 
-                bool paused = now < _pausedUntil;
-                while (!paused && _running < MaxInFlight && Started.Count < PerSecond)
+                if (now < _pausedUntil)
                 {
-                    TaskCompletionSource<bool> next = Urgent.Count > 0 ? Urgent.Dequeue() : Background.Count > 0 ? Background.Dequeue() : null;
-                    if (next == null)
-                        return;
-
-                    _running++;
-                    Started.Enqueue(now);
-                    next.SetResult(true);
+                    if (Waiting.Count > 0)
+                        Wake.Change(Math.Max(1L, _pausedUntil - now), Timeout.Infinite);
+                    return;
                 }
 
-                if (Urgent.Count == 0 && Background.Count == 0)
+                while (_running < MaxInFlight && Started.Count < PerSecond)
+                {
+                    bool warmAllowed = _warmRunning < WarmInFlight && WarmStarted.Count < WarmPerSecond;
+                    Ticket next = null;
+                    foreach (Ticket waiting in Waiting)
+                    {
+                        if (waiting.Priority == Priority.Warm && !warmAllowed)
+                            continue;
+                        if (next == null || waiting.Priority < next.Priority)
+                            next = waiting;
+                    }
+                    if (next == null)
+                        break;
+
+                    Waiting.Remove(next);
+                    _running++;
+                    Started.Enqueue(now);
+                    if (next.Priority == Priority.Warm)
+                    {
+                        next.StartedAsWarm = true;
+                        _warmRunning++;
+                        WarmStarted.Enqueue(now);
+                    }
+                    next.Turn.SetResult(true);
+                }
+
+                if (Waiting.Count == 0 || _running >= MaxInFlight)
                     return;
-                if (paused)
-                    Wake.Change(Math.Max(1L, _pausedUntil - now), Timeout.Infinite);
-                else if (_running < MaxInFlight && Started.Count >= PerSecond)
-                    Wake.Change(Math.Max(1L, WindowMs - (now - Started.Peek())), Timeout.Infinite);
+
+                long wait = long.MaxValue;
+                if (Started.Count >= PerSecond)
+                    wait = WindowMs - (now - Started.Peek());
+                else if (_warmRunning < WarmInFlight && WarmStarted.Count >= WarmPerSecond)
+                    wait = WindowMs - (now - WarmStarted.Peek());
+                if (wait != long.MaxValue)
+                    Wake.Change(Math.Max(1L, wait), Timeout.Infinite);
             }
         }
     }
@@ -220,8 +295,8 @@ namespace Flogger
         public const float KeepFor = 120f;
 
         private static readonly JsonSerializerSettings Json = new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore };
-        private static readonly Func<string, bool, Task<double?>> AskFlea = Post;
-        private static readonly Func<string, bool, Task<double?>> AskAverage = MarketAverage;
+        private static readonly Func<string, Ticket, Task<double?>> AskFlea = Post;
+        private static readonly Func<string, Ticket, Task<double?>> AskAverage = MarketAverage;
 
         private static readonly Dictionary<string, Entry> Flea = new Dictionary<string, Entry>();
         private static readonly Dictionary<string, Entry> Average = new Dictionary<string, Entry>();
@@ -235,18 +310,19 @@ namespace Flogger
             public float FetchedAt = float.NegativeInfinity;
             public bool Failed;
             public Task<double> Pending;
+            public Ticket Ticket;
         }
 
-        public static async Task<(double Value, bool Exact)> Get(Item item, float maxAge)
+        public static async Task<(double Value, bool Exact)> Get(Item item, float maxAge, Priority priority = Priority.Sale)
         {
             if (await BetterFlea())
             {
-                double price = await Ask(Flea, Serialize(item), AskFlea, maxAge);
+                double price = await Ask(Flea, Serialize(item), AskFlea, maxAge, priority);
                 if (price > 0d)
                     return (price, true);
             }
 
-            return (await GetAverage(item, maxAge), false);
+            return (await GetAverage(item, maxAge, priority), false);
         }
 
         public static bool TryGet(Item item, out double value)
@@ -284,7 +360,7 @@ namespace Flogger
             {
                 try
                 {
-                    await Post("[]", true);
+                    await Post("[]", new Ticket(Priority.Hover));
                     Plugin.Log.LogInfo("Better Flea found on the server, flea prices are its own.");
                     return true;
                 }
@@ -296,9 +372,9 @@ namespace Flogger
             }
         }
 
-        private static Task<double?> Post(string body, bool urgent)
+        private static Task<double?> Post(string body, Ticket ticket)
         {
-            return Limiter.Run(urgent, () => Send(body));
+            return Limiter.Run(ticket, () => Send(body));
         }
 
         private static async Task<double?> Send(string body)
@@ -323,9 +399,9 @@ namespace Flogger
             }
         }
 
-        private static Task<double?> MarketAverage(string tpl, bool urgent)
+        private static Task<double?> MarketAverage(string tpl, Ticket ticket)
         {
-            return Limiter.Run(urgent, () => FetchAverage(tpl));
+            return Limiter.Run(ticket, () => FetchAverage(tpl));
         }
 
         private static async Task<double?> FetchAverage(string tpl)
@@ -341,38 +417,47 @@ namespace Flogger
             return await done.Task;
         }
 
-        private static Task<double> Ask(Dictionary<string, Entry> cache, string key, Func<string, bool, Task<double?>> ask, float maxAge)
+        private static Task<double> Ask(Dictionary<string, Entry> cache, string key, Func<string, Ticket, Task<double?>> ask, float maxAge, Priority priority)
         {
             Entry entry = Find(cache, key);
             if (entry.Pending != null)
+            {
+                Limiter.Promote(entry.Ticket, priority);
                 return entry.Pending;
+            }
             if (Time.realtimeSinceStartup - entry.FetchedAt <= (entry.Failed ? Math.Min(maxAge, RetryAfter) : maxAge))
                 return Task.FromResult(entry.Price);
-            return Refresh(entry, key, ask, false);
+            return Refresh(entry, key, ask, priority);
         }
 
-        private static Entry Peek(Dictionary<string, Entry> cache, string key, Func<string, bool, Task<double?>> ask)
+        private static Entry Peek(Dictionary<string, Entry> cache, string key, Func<string, Ticket, Task<double?>> ask)
         {
             Entry entry = Find(cache, key);
-            if (entry.Pending == null && Time.realtimeSinceStartup - entry.FetchedAt > (entry.Failed ? RetryAfter : KeepFor))
-                Refresh(entry, key, ask, true);
+            if (entry.Pending != null)
+                Limiter.Promote(entry.Ticket, Priority.Hover);
+            else if (Time.realtimeSinceStartup - entry.FetchedAt > (entry.Failed ? RetryAfter : KeepFor))
+                Refresh(entry, key, ask, Priority.Hover);
             return entry;
         }
 
-        private static Task<double> Refresh(Entry entry, string key, Func<string, bool, Task<double?>> ask, bool urgent)
+        private static Task<double> Refresh(Entry entry, string key, Func<string, Ticket, Task<double?>> ask, Priority priority)
         {
-            Task<double> running = Run(entry, key, ask, urgent);
+            var ticket = new Ticket(priority);
+            Task<double> running = Run(entry, key, ask, ticket);
             if (!running.IsCompleted)
+            {
                 entry.Pending = running;
+                entry.Ticket = ticket;
+            }
             return running;
         }
 
-        private static async Task<double> Run(Entry entry, string key, Func<string, bool, Task<double?>> ask, bool urgent)
+        private static async Task<double> Run(Entry entry, string key, Func<string, Ticket, Task<double?>> ask, Ticket ticket)
         {
             bool failed = true;
             try
             {
-                double? price = await ask(key, urgent);
+                double? price = await ask(key, ticket);
                 if (price != null)
                 {
                     entry.Price = Math.Max(0d, price.Value);
@@ -390,6 +475,7 @@ namespace Flogger
                 else
                     Limiter.Succeeded();
                 entry.Pending = null;
+                entry.Ticket = null;
                 entry.Failed = failed;
                 entry.FetchedAt = Time.realtimeSinceStartup;
             }
@@ -421,10 +507,10 @@ namespace Flogger
                 : new List<Item> { item };
         }
 
-        private static async Task<double> GetAverage(Item item, float maxAge)
+        private static async Task<double> GetAverage(Item item, float maxAge, Priority priority)
         {
             List<Item> parts = Parts(item);
-            await Task.WhenAll(parts.Select(part => Ask(Average, part.TemplateId.ToString(), AskAverage, maxAge)));
+            await Task.WhenAll(parts.Select(part => Ask(Average, part.TemplateId.ToString(), AskAverage, maxAge, priority)));
             return Sum(item, parts);
         }
 

@@ -521,7 +521,7 @@ namespace Flogger
                     if (!(worn || item.CurrentAddress is GridItemAddress) || item is Money || item.QuestItem)
                         continue;
 
-                    await FleaValue.Get(item, WarmEvery);
+                    await FleaValue.Get(item, WarmEvery, Priority.Warm);
                     if (++priced % 25 == 0)
                         await Task.Yield();
                 }

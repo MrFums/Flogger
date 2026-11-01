@@ -2,9 +2,13 @@
 
 ## 1.1.2
 
-- Price requests are now rate limited: at most 4 at a time and 20 a second, shared by Better Flea prices and the flea's average prices. Warming up the stash and pricing a sale no longer flood the server, which could cause SSL errors and stop a profile from saving. The item you hover still gets its price first.
+- Price requests are now rate limited, for both Better Flea prices and the flea's average prices. Bursts of them could break the game's connection to the server (SSL errors, the game freezing, the profile not saving).
+  - The background price check of your stash now goes one request at a time, at most 3 a second. It takes a few minutes on a big stash, which you don't see.
+  - Pricing a sale is limited to 4 at a time and 20 a second.
+  - The item you hover always goes first, and an item already waiting in the background moves up when you hover it or sell it.
 - A price request that fails is retried after about 10 seconds instead of keeping the old price for minutes.
-- After a failed price request all price requests pause for 10 seconds, doubling up to a minute while they keep failing, so a struggling connection is left alone instead of hammered.
+- After 3 failed price requests in a row all price requests pause for 10 seconds, doubling up to a minute while they keep failing, so a struggling connection is left alone instead of hammered. One item without a price no longer stops the others.
+- A market price request that never answers gives up after 30 seconds.
 
 ## 1.1.1
 
