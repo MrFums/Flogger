@@ -4,6 +4,7 @@
 
 - Price requests are now rate limited: at most 4 at a time and 20 a second, shared by Better Flea prices and the flea's average prices. Warming up the stash and pricing a sale no longer flood the server, which could cause SSL errors and stop a profile from saving. The item you hover still gets its price first.
 - A price request that fails is retried after about 10 seconds instead of keeping the old price for minutes.
+- After a failed price request all price requests pause for 10 seconds, doubling up to a minute while they keep failing, so a struggling connection is left alone instead of hammered.
 
 ## 1.1.1
 

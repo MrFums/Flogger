@@ -132,6 +132,8 @@ namespace Flogger
         private const int MaxInFlight = 4;
         private const int PerSecond = 20;
         private const long WindowMs = 1000;
+        private const long BasePauseMs = 10000;
+        private const long MaxPauseMs = 60000;
 
         private static readonly object Gate = new object();
         private static readonly Queue<TaskCompletionSource<bool>> Urgent = new Queue<TaskCompletionSource<bool>>();
@@ -140,6 +142,24 @@ namespace Flogger
         private static readonly Stopwatch Clock = Stopwatch.StartNew();
         private static readonly System.Threading.Timer Wake = new System.Threading.Timer(_ => Pump(), null, Timeout.Infinite, Timeout.Infinite);
         private static int _running;
+        private static int _failures;
+        private static long _pausedUntil;
+
+        public static void Succeeded()
+        {
+            lock (Gate)
+                _failures = 0;
+        }
+
+        public static void Failed()
+        {
+            lock (Gate)
+            {
+                _failures++;
+                long pause = Math.Min(MaxPauseMs, BasePauseMs << Math.Min(_failures - 1, 6));
+                _pausedUntil = Math.Max(_pausedUntil, Clock.ElapsedMilliseconds + pause);
+            }
+        }
 
         public static async Task<T> Run<T>(bool urgent, Func<Task<T>> send)
         {
@@ -169,7 +189,8 @@ namespace Flogger
                 while (Started.Count > 0 && now - Started.Peek() >= WindowMs)
                     Started.Dequeue();
 
-                while (_running < MaxInFlight && Started.Count < PerSecond)
+                bool paused = now < _pausedUntil;
+                while (!paused && _running < MaxInFlight && Started.Count < PerSecond)
                 {
                     TaskCompletionSource<bool> next = Urgent.Count > 0 ? Urgent.Dequeue() : Background.Count > 0 ? Background.Dequeue() : null;
                     if (next == null)
@@ -180,7 +201,11 @@ namespace Flogger
                     next.SetResult(true);
                 }
 
-                if (_running < MaxInFlight && Started.Count >= PerSecond && (Urgent.Count > 0 || Background.Count > 0))
+                if (Urgent.Count == 0 && Background.Count == 0)
+                    return;
+                if (paused)
+                    Wake.Change(Math.Max(1L, _pausedUntil - now), Timeout.Infinite);
+                else if (_running < MaxInFlight && Started.Count >= PerSecond)
                     Wake.Change(Math.Max(1L, WindowMs - (now - Started.Peek())), Timeout.Infinite);
             }
         }
@@ -360,6 +385,10 @@ namespace Flogger
             }
             finally
             {
+                if (failed)
+                    Limiter.Failed();
+                else
+                    Limiter.Succeeded();
                 entry.Pending = null;
                 entry.Failed = failed;
                 entry.FetchedAt = Time.realtimeSinceStartup;
