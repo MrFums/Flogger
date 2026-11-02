@@ -60,7 +60,7 @@ namespace Flogger
     {
         public const string Guid = "com.fums.flogger";
         public const string Name = "Fums-Flogger";
-        public const string Version = "1.1.2";
+        public const string Version = "1.1.3";
 
         internal static ManualLogSource Log;
 
@@ -268,12 +268,9 @@ namespace Flogger
         }
     }
 
-    // The label has to be final when the menu opens (that's when it fits itself on screen), so prices are
-    // fetched ahead: on hover, and for the whole stash in the background.
     internal static class Menu
     {
         private const string EntryId = "flogger.quicksell";
-        private const float WarmEvery = 600f;
 
         private static readonly HashSet<string> Explained = new HashSet<string>();
         private static Transform _inspect;
@@ -281,8 +278,6 @@ namespace Flogger
         private static Transform _entry;
         private static Item _hovered;
         private static float _nextUpdate;
-        private static float _warmedAt = float.NegativeInfinity;
-        private static bool _warming;
 
         private static Sprite Icon => EFTHardSettings.Instance?.StaticIcons?.GetBigCurrencySign(CurrencyUtil.ROUBLE_ID);
 
@@ -479,61 +474,16 @@ namespace Flogger
             _nextUpdate = Time.realtimeSinceStartup + 1f;
             Plugin.ShowSettings();
 
-            if (Market.InRaid)
-            {
-                _warmedAt = float.NegativeInfinity;
-                return;
-            }
-            if (!Plugin.Enabled.Value || !Plugin.PriceInMenu.Value || Market.Session?.Profile == null)
+            if (Market.InRaid || !Plugin.Enabled.Value || !Plugin.PriceInMenu.Value || Market.Session?.Profile == null)
                 return;
 
             try
             {
                 _ = Market.LoadTraderPrices();
-                Warm();
             }
             catch (Exception e)
             {
                 Plugin.Log.LogWarning($"Couldn't ask for prices ahead of the menu: {e.Message}");
-            }
-        }
-
-        // One request at a time so a hovered item never waits behind the stash, and a few items a frame.
-        private static async void Warm()
-        {
-            if (_warming || Time.realtimeSinceStartup - _warmedAt < WarmEvery || Plugin.Where.Value == SellTo.TradersOnly)
-                return;
-
-            _warming = true;
-            try
-            {
-                Item equipment = QuickSeller.PlayerEquipment;
-                var items = new List<Item>();
-                if (QuickSeller.PlayerStash is Stash stash)
-                    items.AddRange(stash.GetAllItems());
-                if (equipment != null)
-                    items.AddRange(equipment.GetAllItems());
-
-                int priced = 0;
-                foreach (Item item in items)
-                {
-                    bool worn = item.CurrentAddress?.Container?.ParentItem == equipment;
-                    if (!(worn || item.CurrentAddress is GridItemAddress) || item is Money || item.QuestItem)
-                        continue;
-
-                    await FleaValue.Get(item, WarmEvery, Priority.Warm);
-                    if (++priced % 25 == 0)
-                        await Task.Yield();
-                }
-            }
-            catch (Exception e)
-            {
-                Plugin.Log.LogWarning($"Couldn't price the stash ahead of time: {e.Message}");
-            }
-            finally
-            {
-                _warming = false;
-                _warmedAt = Time.realtimeSinceStartup;
             }
         }
 

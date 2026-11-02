@@ -289,8 +289,10 @@ namespace Flogger
     internal static class FleaValue
     {
         private const string FleaRoute = "/betterflea/item-price";
+        private const string MarketRoute = "/client/ragfair/itemMarketPrice";
         private const int MostCached = 10000;
         private const float RetryAfter = 10f;
+        private const double Unknown = -1d;
         private const int AverageTimeoutMs = 30000;
         public const float KeepFor = 120f;
 
@@ -318,6 +320,8 @@ namespace Flogger
             if (await BetterFlea())
             {
                 double price = await Ask(Flea, Serialize(item), AskFlea, maxAge, priority);
+                if (price == Unknown)
+                    return (0d, false);
                 if (price > 0d)
                     return (price, true);
             }
@@ -406,15 +410,35 @@ namespace Flogger
 
         private static async Task<double?> FetchAverage(string tpl)
         {
-            var session = Market.Session;
-            if (session == null)
+            if (Market.Session == null)
                 return null;
 
-            var done = new TaskCompletionSource<double?>(TaskCreationOptions.RunContinuationsAsynchronously);
-            session.GetMarketPrices(tpl, result => done.TrySetResult(result.Succeed && result.Value != null ? result.Value.avg : (double?)null));
-            if (await Task.WhenAny(done.Task, Task.Delay(AverageTimeoutMs)) != done.Task)
-                throw new TimeoutException("the market prices took too long");
-            return await done.Task;
+            Client client = RequestHandler.HttpClient;
+            byte[] body = Zlib.Compress(Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(new { templateId = tpl })), ZlibCompression.Maximum);
+            using (var timeout = new CancellationTokenSource(AverageTimeoutMs))
+            using (HttpRequestMessage request = client.CreateNewHttpRequest(HttpMethod.Post, MarketRoute))
+            {
+                request.Content = new ByteArrayContent(body);
+                try
+                {
+                    using (HttpResponseMessage response = await client.HttpClient.SendAsync(request, timeout.Token))
+                    {
+                        if (!response.IsSuccessStatusCode)
+                            throw new Exception("the server answered " + (int)response.StatusCode);
+
+                        byte[] data = await response.Content.ReadAsByteArrayAsync();
+                        if (Zlib.IsCompressed(data))
+                            data = Zlib.Decompress(data);
+
+                        var answer = JsonConvert.DeserializeObject<MarketAnswer>(Encoding.UTF8.GetString(data));
+                        return answer != null && answer.Err == 0 ? answer.Data?.Avg : null;
+                    }
+                }
+                catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+                {
+                    throw new TimeoutException("the market prices took too long");
+                }
+            }
         }
 
         private static Task<double> Ask(Dictionary<string, Entry> cache, string key, Func<string, Ticket, Task<double?>> ask, float maxAge, Priority priority)
@@ -426,7 +450,7 @@ namespace Flogger
                 return entry.Pending;
             }
             if (Time.realtimeSinceStartup - entry.FetchedAt <= (entry.Failed ? Math.Min(maxAge, RetryAfter) : maxAge))
-                return Task.FromResult(entry.Price);
+                return Task.FromResult(entry.Failed ? Unknown : entry.Price);
             return Refresh(entry, key, ask, priority);
         }
 
@@ -480,7 +504,7 @@ namespace Flogger
                 entry.FetchedAt = Time.realtimeSinceStartup;
             }
 
-            return entry.Price;
+            return failed ? Unknown : entry.Price;
         }
 
         private static Entry Find(Dictionary<string, Entry> cache, string key)
@@ -500,51 +524,27 @@ namespace Flogger
             return cache[key] = new Entry();
         }
 
-        private static List<Item> Parts(Item item)
-        {
-            return item is Weapon
-                ? item.GetAllItems().Where(part => part == item || Attached(part, item)).ToList()
-                : new List<Item> { item };
-        }
-
         private static async Task<double> GetAverage(Item item, float maxAge, Priority priority)
         {
-            List<Item> parts = Parts(item);
-            await Task.WhenAll(parts.Select(part => Ask(Average, part.TemplateId.ToString(), AskAverage, maxAge, priority)));
-            return Sum(item, parts);
+            double price = await Ask(Average, item.TemplateId.ToString(), AskAverage, maxAge, priority);
+            return price == Unknown ? 0d : Sum(item);
         }
 
         private static bool TryAverage(Item item, out double price)
         {
             price = 0d;
-            List<Item> parts = Parts(item);
-            bool loading = false;
-            foreach (Item part in parts)
-            {
-                Entry entry = Peek(Average, part.TemplateId.ToString(), AskAverage);
-                if (entry.Price <= 0d && entry.Pending != null)
-                    loading = true;
-            }
-
-            if (loading)
+            Entry entry = Peek(Average, item.TemplateId.ToString(), AskAverage);
+            if (entry.Price <= 0d && entry.Pending != null)
                 return false;
-            price = Sum(item, parts);
+            price = Sum(item);
             return true;
         }
 
-        // A gun is its parts added up. The item itself needs a price, a part without one counts as nothing.
-        private static double Sum(Item item, List<Item> parts)
+        private static double Sum(Item item)
         {
-            double price = 0d;
-            foreach (Item part in parts)
-            {
-                double each = Average.TryGetValue(part.TemplateId.ToString(), out Entry entry) ? entry.Price : 0d;
-                if (each <= 0d && part == item)
-                    return 0d;
-
-                int rounds = part != item && part.CurrentAddress is StackSlotItemAddress ? Math.Max(1, part.StackObjectsCount) : 1;
-                price += each * rounds;
-            }
+            double price = Average.TryGetValue(item.TemplateId.ToString(), out Entry entry) ? entry.Price : 0d;
+            if (price <= 0d)
+                return 0d;
 
             return Math.Max(0d, price * Quality(item));
         }
@@ -592,6 +592,21 @@ namespace Flogger
         private class FleaAnswer
         {
             public double Price { get; set; }
+        }
+
+        private class MarketAnswer
+        {
+            [JsonProperty("err")]
+            public int Err { get; set; }
+
+            [JsonProperty("data")]
+            public MarketPrices Data { get; set; }
+        }
+
+        private class MarketPrices
+        {
+            [JsonProperty("avg")]
+            public double? Avg { get; set; }
         }
 
         // The item and its attached parts as the server stores them, without the item's own stack count,

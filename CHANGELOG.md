@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.3
+
+- Fixed the game losing its connection to the server ("Unable to complete SSL connection", Curl error 35) after a while with Flogger installed, mostly without Better Flea. The game's own connection stops working after about 1,600 requests in one session, however slowly they are sent, and Flogger's price checks used it. Flogger now asks for flea prices over SPT's separate connection, so the game's connection is left alone.
+- Flogger no longer prices your whole stash in the background every 10 minutes. Prices are fetched for the item you hover, and fresh for every item when you Quick sell, so the server console isn't flooded with price requests.
+- Quick sell never lists an item at an old price: if its price can't be fetched fresh, the item is handled the way "If the flea cannot take an item" says. With Better Flea, a failed Better Flea price no longer falls back to the base game's average.
+- Without Better Flea, guns are no longer overpriced. The flea's average for a gun is already for a whole gun, so adding its parts on top counted them twice (an SVD came out at about twice its price). A gun is now priced like the server judges a listing: the average for the gun itself, adjusted for condition.
+
 ## 1.1.2
 
 - Price requests are now rate limited, for both Better Flea prices and the flea's average prices. Bursts of them could break the game's connection to the server (SSL errors, the game freezing, the profile not saving).
