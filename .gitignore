@@ -8,6 +8,7 @@ dist/
 .vscode/
 *.user
 
-# Local only: release notes, screenshots and the upload copy
+# Local only: SPT install path, release notes, screenshots and the upload copy
+spt-path.txt
 Flogger Files/
 Assets/

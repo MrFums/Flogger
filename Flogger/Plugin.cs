@@ -60,7 +60,7 @@ namespace Flogger
     {
         public const string Guid = "com.fums.flogger";
         public const string Name = "Fums-Flogger";
-        public const string Version = "1.1.3";
+        public const string Version = "1.1.4";
 
         internal static ManualLogSource Log;
 
@@ -474,7 +474,9 @@ namespace Flogger
             _nextUpdate = Time.realtimeSinceStartup + 1f;
             Plugin.ShowSettings();
 
-            if (Market.InRaid || !Plugin.Enabled.Value || !Plugin.PriceInMenu.Value || Market.Session?.Profile == null)
+            // Trader prices are loaded whether or not the menu shows them, so a sale doesn't wait for them. After a
+            // raid the game's new traders have none, and they're asked for here.
+            if (Market.InRaid || !Plugin.Enabled.Value || Market.Session?.Profile == null)
                 return;
 
             try

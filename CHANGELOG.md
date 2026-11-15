@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.4
+
+- Trader prices show again after a raid. Quick sell showed no trader price in the menu, and the first sale after a raid paused while the trader price lists loaded, because they weren't asked for again after the raid.
+- A trader whose price list fails to load is asked again later, waiting longer each time it keeps failing (10 seconds, up to 5 minutes), instead of being left out until you restart the game.
+- Trader price lists now load in the stash even with **Show where it goes in the menu** off, so a sale doesn't wait for them.
+
 ## 1.1.3
 
 - Fixed the game losing its connection to the server ("Unable to complete SSL connection", Curl error 35) after a while with Flogger installed, mostly without Better Flea. The game's own connection stops working after about 1,600 requests in one session, however slowly they are sent, and Flogger's price checks used it. Flogger now asks for flea prices over SPT's separate connection, so the game's connection is left alone.

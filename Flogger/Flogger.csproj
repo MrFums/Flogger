@@ -5,13 +5,14 @@
     <AssemblyName>Flogger</AssemblyName>
     <RootNamespace>Flogger</RootNamespace>
     <LangVersion>latest</LangVersion>
-    <Version>1.1.3</Version>
+    <Version>1.1.4</Version>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <DebugType>none</DebugType>
     <PathMap>$(MSBuildProjectDirectory)=/_/</PathMap>
 
-    <SPTPath Condition="'$(SPTPath)' == ''">E:\Games\SPT4.1-CLEAN</SPTPath>
+    <SPTPathFile>$(MSBuildProjectDirectory)\..\spt-path.txt</SPTPathFile>
+    <SPTPath Condition="'$(SPTPath)' == '' And Exists('$(SPTPathFile)')">$([System.IO.File]::ReadAllText('$(SPTPathFile)').Trim())</SPTPath>
     <Managed>$(SPTPath)\EscapeFromTarkov_Data\Managed</Managed>
     <BepInExCore>$(SPTPath)\BepInEx\core</BepInExCore>
     <SptPlugins>$(SPTPath)\BepInEx\plugins\spt</SptPlugins>

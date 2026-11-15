@@ -27,9 +27,25 @@ namespace Flogger
     internal static class Market
     {
         private const string FenceId = "579dc571d53a0658a154fbec";
+        private const float RetryAfter = 10f;
+        private const float MaxRetryAfter = 300f;
 
-        private static readonly HashSet<string> NoPrices = new HashSet<string>();
-        private static Task _loading;
+        // Keyed by the trader object, not its Id: after a raid the game makes new traders with the same Ids and no
+        // price lists, and those must be asked for again.
+        private static readonly Dictionary<Trader, PriceLoad> Loads = new Dictionary<Trader, PriceLoad>(new SameTrader());
+
+        private sealed class PriceLoad
+        {
+            public Task Pending;
+            public int Failures;
+            public float RetryAt = float.NegativeInfinity;
+        }
+
+        private sealed class SameTrader : IEqualityComparer<Trader>
+        {
+            public bool Equals(Trader a, Trader b) => ReferenceEquals(a, b);
+            public int GetHashCode(Trader trader) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(trader);
+        }
 
         public static IEftSession Session => Singleton<ClientApplication<IEftSession>>.Instance?.GetClientBackEndSession();
 
@@ -54,17 +70,35 @@ namespace Flogger
             get
             {
                 var session = Session;
-                return session?.Traders != null && Unlocked(session).All(t => t._supplyData != null || NoPrices.Contains(t.Id));
+                return session?.Traders != null && Unlocked(session).All(Settled);
             }
         }
 
+        // It has its price list, or the last ask failed and it isn't due to be asked again yet.
+        private static bool Settled(Trader trader)
+        {
+            return trader._supplyData != null
+                   || Loads.TryGetValue(trader, out PriceLoad load) && !IsRunning(load) && Time.realtimeSinceStartup < load.RetryAt;
+        }
+
+        // Asks for every unlocked trader's price list that's missing, and waits for those already being asked for.
         public static Task LoadTraderPrices()
         {
-            if (TraderPricesLoaded)
+            var session = Session;
+            if (session?.Traders == null)
                 return Task.CompletedTask;
-            if (_loading == null || _loading.IsCompleted)
-                _loading = LoadAll();
-            return _loading;
+
+            List<Trader> traders = Unlocked(session).ToList();
+            Forget(traders);
+
+            var waiting = new List<Task>();
+            foreach (Trader trader in traders)
+            {
+                Task load = LoadOne(session, trader);
+                if (!load.IsCompleted)
+                    waiting.Add(load);
+            }
+            return waiting.Count == 0 ? Task.CompletedTask : Task.WhenAll(waiting);
         }
 
         private static IEnumerable<Trader> Unlocked(IEftSession session)
@@ -72,33 +106,62 @@ namespace Flogger
             return session.Traders.Where(t => t?.Info != null && t.Info.Available);
         }
 
-        private static async Task LoadAll()
+        private static bool IsRunning(PriceLoad load)
         {
-            var session = Session;
-            if (session?.Traders == null)
-                return;
-
-            await Task.WhenAll(Unlocked(session)
-                .Where(t => t._supplyData == null && !NoPrices.Contains(t.Id))
-                .Select(t => LoadOne(session, t))
-                .ToList());
+            return load.Pending != null && !load.Pending.IsCompleted;
         }
 
-        private static async Task LoadOne(IEftSession session, Trader trader)
+        // Drops the traders the game has replaced since.
+        private static void Forget(List<Trader> current)
         {
+            if (Loads.Count <= current.Count)
+                return;
+
+            var keep = new HashSet<Trader>(current, new SameTrader());
+            foreach (Trader old in Loads.Keys.Where(t => !keep.Contains(t)).ToList())
+                Loads.Remove(old);
+        }
+
+        private static Task LoadOne(IEftSession session, Trader trader)
+        {
+            if (trader._supplyData != null)
+                return Task.CompletedTask;
+
+            if (!Loads.TryGetValue(trader, out PriceLoad load))
+                Loads[trader] = load = new PriceLoad();
+            if (IsRunning(load))
+                return load.Pending;
+            if (Time.realtimeSinceStartup < load.RetryAt)
+                return Task.CompletedTask;
+
+            return load.Pending = Ask(session, trader, load);
+        }
+
+        private static async Task Ask(IEftSession session, Trader trader, PriceLoad load)
+        {
+            string why = "the server sent none";
             try
             {
                 var result = await session.GetSupplyData(trader.Id);
-                if (result.Succeed && trader._supplyData == null)
+                if (result.Succeed && result.Value != null && trader._supplyData == null)
                     trader._supplyData = result.Value;
             }
             catch (Exception e)
             {
-                Plugin.Log.LogWarning($"Could not load prices for trader {trader.Id}: {e.Message}");
+                why = e.Message;
             }
 
-            if (trader._supplyData == null)
-                NoPrices.Add(trader.Id);
+            if (trader._supplyData != null)
+            {
+                load.Failures = 0;
+                return;
+            }
+
+            // Waits longer each time a trader keeps failing, so the game's connection isn't used up asking.
+            load.Failures++;
+            float wait = Math.Min(MaxRetryAfter, RetryAfter * (1 << Math.Min(load.Failures - 1, 5)));
+            load.RetryAt = Time.realtimeSinceStartup + wait;
+            Plugin.Log.LogWarning($"Could not load prices for trader {trader.Id} ({why}), asking again in {wait:0} s.");
         }
 
         public static bool BestTrader(Item item, out TraderBid best)
