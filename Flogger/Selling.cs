@@ -91,6 +91,131 @@ namespace Flogger
         }
     }
 
+    // Flea prices and fees stay in roubles; this only turns a rouble listing price into the currency
+    // the offer asks buyers for.
+    internal static class FleaMoney
+    {
+        private const double FallbackUsd = 140d;
+        private const double FallbackEur = 160d;
+        private const double FallbackGp = 38000d;
+
+        public static MongoID TemplateId(FleaCurrency currency)
+        {
+            switch (currency)
+            {
+                case FleaCurrency.USD:
+                    return CurrencyUtil.DOLLAR_ID;
+                case FleaCurrency.EUR:
+                    return CurrencyUtil.EURO_ID;
+                case FleaCurrency.GP:
+                    return CurrencyUtil.GP_ID;
+                default:
+                    return CurrencyUtil.ROUBLE_ID;
+            }
+        }
+
+        // Roubles one unit is worth. Prefer trader supply courses, then handbook CreditsPrice,
+        // then a fallback so a listing can still go up before prices have loaded.
+        public static double RubPerUnit(FleaCurrency currency)
+        {
+            MongoID tpl = TemplateId(currency);
+            if (tpl == CurrencyUtil.ROUBLE_ID)
+                return 1d;
+
+            double trader = TraderCourse(tpl);
+            if (Plausible(tpl, trader))
+                return trader;
+
+            double handbook = HandbookCourse(tpl);
+            if (Plausible(tpl, handbook))
+                return handbook;
+
+            return FallbackCourse(tpl);
+        }
+
+        private static double TraderCourse(MongoID currency)
+        {
+            var traders = Market.Session?.Traders;
+            if (traders == null)
+                return 0d;
+
+            string key = currency.ToString();
+            double best = 0d;
+            foreach (Trader trader in traders)
+            {
+                // Supply data is the real course; trader.CurrencyCourses alone can be a placeholder of 1.
+                if (trader?._supplyData?.CurrencyCourses == null)
+                    continue;
+                if (!trader._supplyData.CurrencyCourses.TryGetValue(key, out double rate))
+                    continue;
+                if (Plausible(currency, rate) && rate > best)
+                    best = rate;
+            }
+            return best;
+        }
+
+        private static double HandbookCourse(MongoID currency)
+        {
+            try
+            {
+                var templates = Singleton<ItemFactory>.Instance?.ItemTemplates;
+                if (templates != null && templates.TryGetValue(currency, out ItemTemplate template)
+                    && Plausible(currency, template.CreditsPrice))
+                    return template.CreditsPrice;
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning($"Couldn't read handbook price for flea currency: {e.Message}");
+            }
+            return 0d;
+        }
+
+        private static double FallbackCourse(MongoID currency)
+        {
+            if (currency == CurrencyUtil.DOLLAR_ID)
+                return FallbackUsd;
+            if (currency == CurrencyUtil.EURO_ID)
+                return FallbackEur;
+            if (currency == CurrencyUtil.GP_ID)
+                return FallbackGp;
+            return 1d;
+        }
+
+        private static bool Plausible(MongoID currency, double rate)
+        {
+            if (rate <= 1d)
+                return false;
+            // GP coins are thousands of roubles; USD/EUR are typically ~100–200.
+            if (currency == CurrencyUtil.GP_ID)
+                return rate >= 1000d;
+            return rate >= 10d;
+        }
+
+        public static int ToOfferAmount(int roubles, FleaCurrency currency)
+        {
+            if (currency == FleaCurrency.RUB)
+                return Math.Max(1, roubles);
+            double rate = RubPerUnit(currency);
+            return Math.Max(1, (int)Math.Round(roubles / rate));
+        }
+
+        public static string Format(double amount, FleaCurrency currency)
+        {
+            string number = Math.Round(amount).ToString("N0", CultureInfo.InvariantCulture);
+            switch (currency)
+            {
+                case FleaCurrency.USD:
+                    return "$" + number;
+                case FleaCurrency.EUR:
+                    return "€" + number;
+                case FleaCurrency.GP:
+                    return number + " GP";
+                default:
+                    return number + " ₽";
+            }
+        }
+    }
+
     internal static class QuickSeller
     {
         private const string StillFull = "it still has things in it";
@@ -299,8 +424,14 @@ namespace Flogger
                 (double value, bool exact) = values[i].Result;
                 Sale sale = Sale.For(items[i], value, ragFair, controller, where, fleaFirst);
                 if (value > 0d)
+                {
+                    FleaCurrency currency = Plugin.FleaOfferCurrency.Value;
+                    string listed = currency == FleaCurrency.RUB
+                        ? ""
+                        : $", offer {FleaMoney.Format(FleaMoney.ToOfferAmount(sale.ListPrice, currency), currency)}";
                     Plugin.Log.LogInfo($"{sale.Name}: flea value {Money(value)} ({(exact ? "Better Flea" : "base game")}), "
-                                       + $"listing price {Money(sale.ListPrice)}, fee {Money(sale.Fee)}");
+                                       + $"listing price {Money(sale.ListPrice)}{listed}, fee {Money(sale.Fee)}");
+                }
                 all.Add(sale);
             }
             Plan(all, Market.FreeOffers(ragFair), Roubles(stash), where);
@@ -329,8 +460,13 @@ namespace Flogger
                 await ListOnFlea(ragFair, group, stash);
                 int listed = group.Where(s => !StillOwned(s.Item, stash)).Sum(s => s.Count);
                 if (listed > 0)
-                    done.Add($"{first.Name}{(listed > 1 ? $" x{listed}" : "")} listed on the flea for {Money(first.ListPrice)}{(listed > 1 ? " each" : "")} "
+                {
+                    FleaCurrency currency = Plugin.FleaOfferCurrency.Value;
+                    int offerPrice = FleaMoney.ToOfferAmount(first.ListPrice, currency);
+                    done.Add($"{first.Name}{(listed > 1 ? $" x{listed}" : "")} listed on the flea for "
+                             + $"{FleaMoney.Format(offerPrice, currency)}{(listed > 1 ? " each" : "")} "
                              + $"(fee {Money(group.Sum(s => s.Fee))})");
+                }
 
                 foreach (Sale sale in group.Where(s => StillOwned(s.Item, stash)))
                 {
@@ -429,7 +565,13 @@ namespace Flogger
 
         private static async Task ListOnFlea(RagFair ragFair, List<Sale> sales, Stash stash)
         {
-            var requirement = new BarterTemplate { _tpl = CurrencyUtil.ROUBLE_ID.ToString(), count = sales[0].ListPrice };
+            FleaCurrency currency = Plugin.FleaOfferCurrency.Value;
+            int offerPrice = FleaMoney.ToOfferAmount(sales[0].ListPrice, currency);
+            var requirement = new BarterTemplate
+            {
+                _tpl = FleaMoney.TemplateId(currency).ToString(),
+                count = offerPrice
+            };
             var finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             ragFair.AddOffer(false, sales.Select(s => s.Item.Id.ToString()).ToArray(), new[] { requirement }, () => finished.TrySetResult(true));
             await finished.Task;
@@ -496,6 +638,21 @@ namespace Flogger
         public static string Money(double roubles)
         {
             return Number(roubles) + " ₽";
+        }
+
+        // Flea menu / totals in the offer currency. Trader amounts stay in Money(...).
+        public static string FleaLabel(double roubles)
+        {
+            FleaCurrency currency = Plugin.FleaOfferCurrency.Value;
+            if (currency == FleaCurrency.RUB)
+                return Money(roubles);
+            return FleaMoney.Format(FleaMoney.ToOfferAmount(Math.Max(0, (int)Math.Round(roubles)), currency), currency);
+        }
+
+        public static string FleaOfferLabel(int listPrice)
+        {
+            FleaCurrency currency = Plugin.FleaOfferCurrency.Value;
+            return FleaMoney.Format(FleaMoney.ToOfferAmount(listPrice, currency), currency);
         }
 
         private static string Money(int amount, Trader trader)

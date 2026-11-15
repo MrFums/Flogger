@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.0
+
+- New setting **Flea offer currency**: list Quick sell flea offers in RUB (default), USD, EUR, or GP. The flea value and fee stay in roubles; the offer price is converted at the trader currency course (or a handbook-style fallback). The menu and listing notifications show that currency. Traders are unchanged.
+
 ## 1.1.3
 
 - Fixed the game losing its connection to the server ("Unable to complete SSL connection", Curl error 35) after a while with Flogger installed, mostly without Better Flea. The game's own connection stops working after about 1,600 requests in one session, however slowly they are sent, and Flogger's price checks used it. Flogger now asks for flea prices over SPT's separate connection, so the game's connection is left alone.
