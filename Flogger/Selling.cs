@@ -500,14 +500,13 @@ namespace Flogger
             if (context == null)
                 return false;
 
-            double total = refused.Sum(s => s.Trader.Roubles);
             var text = new StringBuilder(refused.Count == 1
-                ? $"Sell it to {refused[0].Trader.Trader.LocalizedName} for {Money(total)} instead? The flea can't take it."
-                : $"Sell {refused.Count} items to traders for {Money(total)} instead? The flea can't take them.");
+                ? $"Sell it to {refused[0].Trader.Trader.LocalizedName} for {Money(refused[0].Trader.Amount, refused[0].Trader.Trader)} instead? The flea can't take it."
+                : $"Sell {refused.Count} items to traders for {TraderTotal(refused)} instead? The flea can't take them.");
 
             double lost = refused.Sum(s => Math.Max(0d, s.FleaNet - s.Trader.Roubles));
             if (lost >= 1d)
-                text.Append($"\nYou'd get about {Money(lost)} less than on the flea.");
+                text.Append($"\nYou'd get about {FleaLabel(lost)} less than on the flea.");
 
             foreach (var reason in refused.GroupBy(s => s.FleaRefusal))
             {
@@ -516,7 +515,8 @@ namespace Flogger
                 {
                     int count = same.Count();
                     text.Append('\n').Append(same.Key.Name).Append(count > 1 ? $" x{count}" : "")
-                        .Append(" - ").Append(same.Key.Trader.LocalizedName).Append(' ').Append(Money(same.Sum(s => s.Trader.Roubles)));
+                        .Append(" - ").Append(same.Key.Trader.LocalizedName).Append(' ')
+                        .Append(Money(same.Sum(s => s.Trader.Amount), same.Key.Trader));
                 }
             }
 
@@ -655,7 +655,7 @@ namespace Flogger
             return FleaMoney.Format(FleaMoney.ToOfferAmount(listPrice, currency), currency);
         }
 
-        private static string Money(int amount, Trader trader)
+        public static string Money(int amount, Trader trader)
         {
             switch (trader.Settings.Currency)
             {
@@ -666,6 +666,15 @@ namespace Flogger
                 default:
                     return Money(amount);
             }
+        }
+
+        // One currency if every sale is to the same trader currency; otherwise rouble total.
+        private static string TraderTotal(List<Sale> sales)
+        {
+            Trader first = sales[0].Trader.Trader;
+            if (sales.All(s => s.Trader.Trader.Settings.Currency == first.Settings.Currency))
+                return Money(sales.Sum(s => s.Trader.Amount), first);
+            return Money(sales.Sum(s => s.Trader.Roubles));
         }
     }
 }

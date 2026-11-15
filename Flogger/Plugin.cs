@@ -8,6 +8,7 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using EFT.Communications;
 using EFT.InventoryLogic;
+using EFT.Trading;
 using EFT.UI;
 using EFT.UI.DragAndDrop;
 using EFT.UI.Ragfair;
@@ -547,9 +548,12 @@ namespace Flogger
                 double total = 0d;
                 double fleaRub = 0d;
                 double traderRub = 0d;
+                int traderAmount = 0;
                 double lost = 0d;
                 int fleaOffers = 0;
                 Sale last = null;
+                Trader traderForTotal = null;
+                bool tradersSameCurrency = true;
                 foreach (Sale sale in sales)
                 {
                     if (sale.ToFlea)
@@ -562,6 +566,11 @@ namespace Flogger
                     {
                         total += sale.Trader.Roubles;
                         traderRub += sale.Trader.Roubles;
+                        traderAmount += sale.Trader.Amount;
+                        if (traderForTotal == null)
+                            traderForTotal = sale.Trader.Trader;
+                        else if (traderForTotal.Settings.Currency != sale.Trader.Trader.Settings.Currency)
+                            tradersSameCurrency = false;
                     }
                     if (sale.FleaLocked)
                         lost += sale.FleaNet - sale.Trader.Roubles;
@@ -572,11 +581,16 @@ namespace Flogger
                 {
                     if (total <= 0d)
                         return plain;
+                    string traderPart = traderForTotal != null && tradersSameCurrency
+                        ? QuickSeller.Money(traderAmount, traderForTotal)
+                        : QuickSeller.Money(traderRub);
                     string amount = fleaRub > 0d && traderRub <= 0d
                         ? QuickSeller.FleaOfferLabel(fleaOffers)
-                        : fleaRub > 0d && Plugin.FleaOfferCurrency.Value != FleaCurrency.RUB
-                            ? $"{QuickSeller.FleaOfferLabel(fleaOffers)} + {QuickSeller.Money(traderRub)}"
-                            : QuickSeller.Money(total);
+                        : fleaRub > 0d && traderRub > 0d
+                            ? $"{QuickSeller.FleaOfferLabel(fleaOffers)} + {traderPart}"
+                            : traderRub > 0d
+                                ? traderPart
+                                : QuickSeller.Money(total);
                     return lost >= 1d
                         ? $"Quick sell ({items.Count} items, ~{amount}, ~{QuickSeller.FleaLabel(lost)} lost to flea locks)"
                         : $"Quick sell ({items.Count} items, ~{amount})";
@@ -589,7 +603,7 @@ namespace Flogger
                     return !last.HasTrader && !last.FleaPossible ? $"Quick sell (can't be sold{locked})" : plain;
                 return last.ToFlea
                     ? $"Quick sell (flea ~{QuickSeller.FleaOfferLabel(last.ListPrice)})"
-                    : $"Quick sell ({last.Trader.Trader.LocalizedName} {QuickSeller.Money(total)}{locked})";
+                    : $"Quick sell ({last.Trader.Trader.LocalizedName} {QuickSeller.Money(last.Trader.Amount, last.Trader.Trader)}{locked})";
             }
             catch (Exception e)
             {
