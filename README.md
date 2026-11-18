@@ -29,6 +29,7 @@ To remove it, delete that folder. Don't install it on a Fika headless client.
 Press **F12** in game > Fums-Flogger.
 
 - **Sell to**: whoever pays most, traders only, or flea only.
+- **Flea offer currency**: RUB (default), USD, EUR, or GP. Flea listings ask buyers for that currency; the fee is still paid in roubles. Traders are unchanged.
 - **Sell speed** (only shown with Better Flea): Near instant (85%), Fast (90%), Normal (100%), Max profit (110%), or Custom.
 - **Flea listing price**: a % slider, used without Better Flea or when Sell speed is Custom.
 - **Flea must pay this much more**: 10% by default. Not used with Better Flea on Near instant, since those listings sell within seconds.

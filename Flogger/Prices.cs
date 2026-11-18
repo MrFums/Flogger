@@ -21,6 +21,8 @@ namespace Flogger
     internal struct TraderBid
     {
         public Trader Trader;
+        // What the trader pays in their own currency (for display). Roubles is that times their course.
+        public int Amount;
         public double Roubles;
     }
 
@@ -120,7 +122,7 @@ namespace Flogger
                 double rate = trader.CurrencyCourses.TryGetValue(price.Value.CurrencyId.Value.ToString(), out double r) ? r : 1d;
                 double roubles = price.Value.Amount * rate;
                 if (roubles > best.Roubles)
-                    best = new TraderBid { Trader = trader, Roubles = roubles };
+                    best = new TraderBid { Trader = trader, Amount = price.Value.Amount, Roubles = roubles };
             }
 
             return best.Trader != null;

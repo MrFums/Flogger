@@ -8,6 +8,7 @@ using BepInEx.Configuration;
 using BepInEx.Logging;
 using EFT.Communications;
 using EFT.InventoryLogic;
+using EFT.Trading;
 using EFT.UI;
 using EFT.UI.DragAndDrop;
 using EFT.UI.Ragfair;
@@ -47,6 +48,14 @@ namespace Flogger
         Custom
     }
 
+    public enum FleaCurrency
+    {
+        RUB,
+        USD,
+        EUR,
+        GP
+    }
+
     // Read by Configuration Manager by name.
     internal sealed class ConfigurationManagerAttributes
     {
@@ -60,12 +69,13 @@ namespace Flogger
     {
         public const string Guid = "com.fums.flogger";
         public const string Name = "Fums-Flogger";
-        public const string Version = "1.1.3";
+        public const string Version = "1.2.0";
 
         internal static ManualLogSource Log;
 
         internal static ConfigEntry<bool> Enabled;
         internal static ConfigEntry<SellTo> Where;
+        internal static ConfigEntry<FleaCurrency> FleaOfferCurrency;
         internal static ConfigEntry<int> FleaMargin;
         internal static ConfigEntry<int> ListingShare;
         internal static ConfigEntry<SellSpeed> Speed;
@@ -155,6 +165,12 @@ namespace Flogger
                 new ConfigDescription("WhoeverPaysMost: the flea or the best trader, whichever gives more money. "
                     + "TradersOnly / FleaOnly: never use the other one.",
                     null, Shown(90)));
+            FleaOfferCurrency = Config.Bind("1. General", "Flea offer currency", FleaCurrency.RUB,
+                new ConfigDescription("Currency buyers must pay when Quick sell lists an item on the flea. "
+                    + "RUB / USD / EUR / GP. The listing price is still based on the flea value in roubles, then "
+                    + "converted at the current exchange rate (trader currency courses, or the handbook price). "
+                    + "The flea fee is always paid in roubles. Traders are unchanged.",
+                    null, Shown(85)));
             Speed = Config.Bind("1. General", "Sell speed (Better Flea)", SellSpeed.NearInstant,
                 new ConfigDescription("How fast Better Flea sells a Quick sell listing, and so what it asks. "
                     + "NearInstant: 85% of the flea value, sells in seconds. Fast: 90%, within about a minute. "
@@ -279,7 +295,17 @@ namespace Flogger
         private static Item _hovered;
         private static float _nextUpdate;
 
-        private static Sprite Icon => EFTHardSettings.Instance?.StaticIcons?.GetBigCurrencySign(CurrencyUtil.ROUBLE_ID);
+        private static Sprite Icon
+        {
+            get
+            {
+                var icons = EFTHardSettings.Instance?.StaticIcons;
+                if (icons == null)
+                    return null;
+                Sprite sign = icons.GetBigCurrencySign(FleaMoney.TemplateId(Plugin.FleaOfferCurrency.Value));
+                return sign != null ? sign : icons.GetBigCurrencySign(CurrencyUtil.ROUBLE_ID);
+            }
+        }
 
         public static void Apply(Harmony harmony)
         {
@@ -520,14 +546,32 @@ namespace Flogger
                     Plugin.Where.Value);
 
                 double total = 0d;
+                double fleaRub = 0d;
+                double traderRub = 0d;
+                int traderAmount = 0;
                 double lost = 0d;
+                int fleaOffers = 0;
                 Sale last = null;
+                Trader traderForTotal = null;
+                bool tradersSameCurrency = true;
                 foreach (Sale sale in sales)
                 {
                     if (sale.ToFlea)
+                    {
                         total += sale.FleaNet;
+                        fleaRub += sale.FleaNet;
+                        fleaOffers += sale.ListPrice * sale.Count;
+                    }
                     else if (sale.HasTrader)
+                    {
                         total += sale.Trader.Roubles;
+                        traderRub += sale.Trader.Roubles;
+                        traderAmount += sale.Trader.Amount;
+                        if (traderForTotal == null)
+                            traderForTotal = sale.Trader.Trader;
+                        else if (traderForTotal.Settings.Currency != sale.Trader.Trader.Settings.Currency)
+                            tradersSameCurrency = false;
+                    }
                     if (sale.FleaLocked)
                         lost += sale.FleaNet - sale.Trader.Roubles;
                     last = sale;
@@ -537,19 +581,29 @@ namespace Flogger
                 {
                     if (total <= 0d)
                         return plain;
+                    string traderPart = traderForTotal != null && tradersSameCurrency
+                        ? QuickSeller.Money(traderAmount, traderForTotal)
+                        : QuickSeller.Money(traderRub);
+                    string amount = fleaRub > 0d && traderRub <= 0d
+                        ? QuickSeller.FleaOfferLabel(fleaOffers)
+                        : fleaRub > 0d && traderRub > 0d
+                            ? $"{QuickSeller.FleaOfferLabel(fleaOffers)} + {traderPart}"
+                            : traderRub > 0d
+                                ? traderPart
+                                : QuickSeller.Money(total);
                     return lost >= 1d
-                        ? $"Quick sell ({items.Count} items, ~{QuickSeller.Money(total)}, ~{QuickSeller.Money(lost)} lost to flea locks)"
-                        : $"Quick sell ({items.Count} items, ~{QuickSeller.Money(total)})";
+                        ? $"Quick sell ({items.Count} items, ~{amount}, ~{QuickSeller.FleaLabel(lost)} lost to flea locks)"
+                        : $"Quick sell ({items.Count} items, ~{amount})";
                 }
 
                 if (last == null)
                     return plain;
-                string locked = last.FleaLocked ? $", flea locked ~{QuickSeller.Money(last.FleaNet)}" : "";
+                string locked = last.FleaLocked ? $", flea locked ~{QuickSeller.FleaLabel(last.FleaNet)}" : "";
                 if (total <= 0d)
                     return !last.HasTrader && !last.FleaPossible ? $"Quick sell (can't be sold{locked})" : plain;
                 return last.ToFlea
-                    ? $"Quick sell (flea ~{QuickSeller.Money(total)})"
-                    : $"Quick sell ({last.Trader.Trader.LocalizedName} {QuickSeller.Money(total)}{locked})";
+                    ? $"Quick sell (flea ~{QuickSeller.FleaOfferLabel(last.ListPrice)})"
+                    : $"Quick sell ({last.Trader.Trader.LocalizedName} {QuickSeller.Money(last.Trader.Amount, last.Trader.Trader)}{locked})";
             }
             catch (Exception e)
             {
